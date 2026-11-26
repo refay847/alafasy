@@ -6,6 +6,7 @@ import 'package:just_audio/just_audio.dart';
 
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/utils/arabic_utils.dart';
+import '../../../../core/widgets/app_logo.dart';
 import '../../data/services/quran_audio_service.dart';
 import '../../domain/entities/surah.dart';
 import '../state/quran_controller.dart';
@@ -226,6 +227,29 @@ class _Artwork extends StatelessWidget {
             child: Stack(
               alignment: Alignment.center,
               children: [
+                // The reciter photo fills the inner circle.
+                SizedBox(
+                  width: inner,
+                  height: inner,
+                  child: ClipOval(
+                    child: Image.asset(
+                      AppLogo.photoAsset,
+                      fit: BoxFit.cover,
+                      alignment: Alignment.topCenter,
+                      filterQuality: FilterQuality.high,
+                      gaplessPlayback: true,
+                      errorBuilder: (_, __, ___) => ColoredBox(
+                        color: colors.goldSoft,
+                        child: Icon(
+                          Icons.menu_book_rounded,
+                          color: colors.gold,
+                          size: size * 0.3,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                // Thin gold ring around the photo.
                 Container(
                   width: inner,
                   height: inner,
@@ -243,27 +267,31 @@ class _Artwork extends StatelessWidget {
                       color: colors.gold,
                     ),
                   ),
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'القرآن الكريم',
-                      style: TextStyle(
-                        fontSize: size * 0.104,
-                        fontWeight: FontWeight.bold,
-                        color: colors.goldText,
-                      ),
+                // Surah number badge.
+                Positioned(
+                  bottom: size * 0.01,
+                  child: Container(
+                    constraints: BoxConstraints(
+                      minWidth: size * 0.19,
+                      minHeight: size * 0.19,
                     ),
-                    SizedBox(height: size * 0.04),
-                    Text(
+                    padding: EdgeInsets.symmetric(horizontal: size * 0.04),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.rectangle,
+                      borderRadius: BorderRadius.circular(size),
+                      color: colors.gold,
+                      border: Border.all(color: colors.card, width: 2.5),
+                    ),
+                    child: Text(
                       ArabicUtils.toArabicDigits(surahNumber),
                       style: TextStyle(
                         fontSize: size * 0.075,
-                        color: colors.gold,
                         fontWeight: FontWeight.bold,
+                        color: colors.onGold,
                       ),
                     ),
-                  ],
+                  ),
                 ),
               ],
             ),

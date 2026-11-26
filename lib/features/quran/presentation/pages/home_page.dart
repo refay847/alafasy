@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/utils/arabic_utils.dart';
+import '../../../../core/widgets/app_logo.dart';
 import '../../data/services/quran_audio_service.dart';
 import '../../domain/entities/surah.dart';
 import '../state/quran_controller.dart';
@@ -41,7 +42,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   // Approximate layout metrics, only used to jump close to the current surah
   // before Scrollable.ensureVisible makes it exact.
-  static const double _headerExtent = 170;
+  static const double _headerExtent = 266;
   static const double _pinnedExtent = 124;
   static const double _tileExtent = 78;
 
@@ -383,6 +384,8 @@ class _Header extends StatelessWidget {
       ),
       child: Column(
         children: [
+          const AppLogo(size: 84),
+          const SizedBox(height: 14),
           Text(
             'القرآن الكريم',
             style: TextStyle(

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 
 import 'core/theme/app_theme.dart';
+import 'core/widgets/app_logo.dart';
 import 'features/quran/data/datasources/quran_local_data_source.dart';
 import 'features/quran/data/datasources/quran_preferences.dart';
 import 'features/quran/data/services/notification_artwork.dart';
@@ -173,32 +174,62 @@ class _QuranAppState extends State<QuranApp> with WidgetsBindingObserver {
   }
 }
 
+/// Always uses the dark brand look, exactly like the native splash screen,
+/// so the hand-off from the native splash to Flutter has no visible jump.
 class _LoadingScreen extends StatelessWidget {
   const _LoadingScreen();
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.colors;
+    return Theme(
+      data: AppTheme.dark(),
+      child: Builder(
+        builder: (context) {
+          final colors = context.colors;
 
-    return Scaffold(
-      body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'القرآن الكريم',
-              style: TextStyle(
-                fontSize: 32,
-                fontWeight: FontWeight.bold,
-                color: colors.goldText,
+          return Scaffold(
+            body: SafeArea(
+              child: Stack(
+                children: [
+                  // Same position and size as the native splash logo.
+                  const Center(child: AppLogo(size: 140)),
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 56,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'القرآن الكريم',
+                          style: TextStyle(
+                            fontSize: 24,
+                            fontWeight: FontWeight.bold,
+                            color: colors.goldText,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'بصوت الشيخ مشاري العفاسي',
+                          style: TextStyle(color: colors.muted, fontSize: 13),
+                        ),
+                        const SizedBox(height: 20),
+                        SizedBox(
+                          width: 26,
+                          height: 26,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.5,
+                            color: colors.gold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 24),
-            CircularProgressIndicator(color: colors.gold),
-            const SizedBox(height: 16),
-            Text('جاري التحميل...', style: TextStyle(color: colors.muted)),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
