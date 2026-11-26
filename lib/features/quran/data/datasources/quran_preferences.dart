@@ -42,6 +42,15 @@ class QuranPreferences {
 
   Future<void> setLastIndex(int value) => _prefs.setInt(_lastIndexKey, value);
 
+  /// Saves the surah index and the position inside it together, so the two
+  /// values can never get out of sync (e.g. new surah + old position).
+  Future<void> saveSession({required int index, required int positionMs}) async {
+    await Future.wait([
+      _prefs.setInt(_lastIndexKey, index),
+      _prefs.setInt(_lastPositionKey, positionMs < 0 ? 0 : positionMs),
+    ]);
+  }
+
   int get lastPositionMs => _prefs.getInt(_lastPositionKey) ?? 0;
 
   Future<void> setLastPositionMs(int value) {

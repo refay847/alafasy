@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:just_audio/just_audio.dart';
 
@@ -49,29 +48,65 @@ class QuranAudioService {
   bool _listening = false;
   DateTime _lastSave = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// The surah index that is currently stored in preferences (-1 = nothing).
+  int _persistedIndex = -1;
+
+  /// False until the user (or the notification controls) actually does
+  /// something. While false, the player is only showing the *restored* state,
+  /// so no event coming from the player may overwrite the saved session.
+  bool _interacted = false;
+
+  /// True once the user (or the notification) has started interacting.
+  bool get hasInteracted => _interacted;
+
+  /// The restored surah + position that must be applied with an explicit seek
+  /// the first time playback starts (see [_applyPendingRestore]).
+  ({int index, Duration position})? _pendingRestore;
+
   Future<void> initialize() async {
-    final sources = surahs.map((surah) {
-      return AudioSource.asset(
-        surah.audioAsset,
-        tag: MediaItem(
-          id: surah.number.toString(),
-          title: surah.arabicName,
-          artist: 'مشاري بن راشد العفاسي',
-          album: 'القرآن الكريم',
-        ),
-      );
-    }).toList();
+    final sources =
+        surahs.map((surah) => AudioSource.asset(surah.audioAsset)).toList();
 
     final hasLastSession = preferences.hasLastSession;
-    final savedIndex = preferences.lastIndex.clamp(0, surahs.length - 1).toInt();
+    final savedIndex = hasLastSession
+        ? preferences.lastIndex.clamp(0, surahs.length - 1).toInt()
+        : 0;
+    final savedPosition = hasLastSession
+        ? Duration(milliseconds: preferences.lastPositionMs)
+        : Duration.zero;
 
-    await player.setAudioSources(
-      sources,
-      preload: false,
-      initialIndex: hasLastSession ? savedIndex : 0,
-      initialPosition:
-          hasLastSession ? Duration(milliseconds: preferences.lastPositionMs) : Duration.zero,
-    );
+    _persistedIndex = hasLastSession ? savedIndex : -1;
+
+    // Until the user interacts, nothing may overwrite the saved session.
+    if (!player.playing) _interacted = false;
+
+    Future<void> load({required bool preload}) {
+      return player.setAudioSources(
+        sources,
+        preload: preload,
+        initialIndex: savedIndex,
+        initialPosition: savedPosition,
+      );
+    }
+
+    // Load the saved surah right away (preload: true). With lazy loading the
+    // UI showed the restored surah, but the native player was not yet told
+    // which track to open, so the first "play" could start from surah 1.
+    try {
+      await load(preload: true);
+    } catch (_) {
+      // e.g. the saved asset failed to open: don't block the whole app.
+      await load(preload: false);
+    }
+
+    // Belt and braces: apply the restored surah + position explicitly on the
+    // first play, whichever button triggers it.
+    _pendingRestore =
+        hasLastSession ? (index: savedIndex, position: savedPosition) : null;
+
+    if (player.currentIndex != savedIndex) {
+      await player.seek(savedPosition, index: savedIndex);
+    }
 
     await player.setSpeed(preferences.speed);
     await player.setLoopMode(preferences.loopMode);
@@ -93,9 +128,14 @@ class QuranAudioService {
     _subscriptions.addAll([
       player.positionStream.listen(_onPosition),
       player.currentIndexStream.listen(_onIndexChanged),
-      // skip(1): the first event is the initial value, not a user pause.
-      player.playingStream.skip(1).listen((playing) {
-        if (!playing) unawaited(_saveProgress());
+      player.playingStream.listen((playing) {
+        if (playing) {
+          // Playing (from the app or the notification) means the restored
+          // state is no longer "pristine".
+          _interacted = true;
+        } else {
+          unawaited(persistNow());
+        }
       }),
       player.playbackEventStream.listen(
         (_) {},
@@ -109,18 +149,31 @@ class QuranAudioService {
   void _onIndexChanged(int? index) {
     if (index == null) return;
 
-    if (index != preferences.lastIndex) {
-      unawaited(preferences.setLastIndex(index));
-      unawaited(preferences.setLastPositionMs(0));
+    // While the user has not interacted, the player is only mirroring the
+    // restored session. Ignore it, otherwise a transient index 0 emitted
+    // during loading would overwrite the surah we want to resume.
+    if (!_interacted) return;
+
+    if (index != _persistedIndex) {
+      _persistedIndex = index;
+      unawaited(preferences.saveSession(index: index, positionMs: 0));
     }
   }
 
   void _onPosition(Duration position) {
     // Persist progress at most every 5 seconds while playing.
     final now = DateTime.now();
-    if (player.playing && now.difference(_lastSave) >= const Duration(seconds: 5)) {
+    if (_interacted &&
+        player.playing &&
+        player.currentIndex == _persistedIndex &&
+        now.difference(_lastSave) >= const Duration(seconds: 5)) {
       _lastSave = now;
-      unawaited(preferences.setLastPositionMs(position.inMilliseconds));
+      unawaited(
+        preferences.saveSession(
+          index: _persistedIndex,
+          positionMs: position.inMilliseconds,
+        ),
+      );
     }
 
     // "Until end of surah" sleep timer.
@@ -136,27 +189,67 @@ class QuranAudioService {
     }
   }
 
-  Future<void> _saveProgress() {
-    return preferences.setLastPositionMs(player.position.inMilliseconds);
+  /// Writes the current surah + position right now. Called on pause, when the
+  /// app goes to the background, and on dispose, because Android can kill the
+  /// process without any further notice.
+  Future<void> persistNow() async {
+    if (!_interacted) return;
+
+    final index = player.currentIndex;
+    if (index == null) return;
+
+    _persistedIndex = index;
+
+    await preferences.saveSession(
+      index: index,
+      positionMs: player.position.inMilliseconds,
+    );
   }
 
   // ---------------------------------------------------------------------------
   // Playback
   // ---------------------------------------------------------------------------
 
+  /// Seeks to the restored surah + position. Runs once, right before the first
+  /// playback after startup.
+  Future<void> _applyPendingRestore() async {
+    final restore = _pendingRestore;
+    if (restore == null) return;
+
+    _pendingRestore = null;
+    await player.seek(restore.position, index: restore.index);
+  }
+
   Future<void> playSurah(int index) async {
     if (index < 0 || index >= surahs.length) return;
 
+    _interacted = true;
     hasSession.value = true;
 
     final isDifferent = player.currentIndex != index;
 
+    // Always store the session (also for surah #1, which used to be skipped
+    // because its index equals the player's initial index).
+    _persistedIndex = index;
+    await preferences.saveSession(
+      index: index,
+      positionMs: isDifferent
+          ? 0
+          : (_pendingRestore?.position.inMilliseconds ??
+              player.position.inMilliseconds),
+    );
+
     if (isDifferent) {
-      await preferences.setLastPositionMs(0);
-      await preferences.setLastIndex(index);
+      // Explicitly choosing another surah replaces the restored one.
+      _pendingRestore = null;
       await player.seek(Duration.zero, index: index);
-    } else if (player.processingState == ProcessingState.completed) {
-      await player.seek(Duration.zero);
+    } else {
+      // Same surah as the restored one: continue from the saved minute.
+      await _applyPendingRestore();
+
+      if (player.processingState == ProcessingState.completed) {
+        await player.seek(Duration.zero);
+      }
     }
 
     // Do NOT await play(): its Future only completes when playback pauses
@@ -166,13 +259,15 @@ class QuranAudioService {
     }
   }
 
-  Future<void> togglePlayPause() async {
+  /// Starts / resumes playback. Used by the in-app buttons and by the
+  /// notification, so both behave exactly the same.
+  Future<void> play() async {
+    _interacted = true;
     hasSession.value = true;
 
-    if (player.playing) {
-      await player.pause();
-      return;
-    }
+    if (player.playing) return;
+
+    await _applyPendingRestore();
 
     if (player.processingState == ProcessingState.completed) {
       await player.seek(Duration.zero);
@@ -181,30 +276,56 @@ class QuranAudioService {
     unawaited(player.play());
   }
 
+  Future<void> togglePlayPause() async {
+    if (player.playing) {
+      _interacted = true;
+      await player.pause();
+      return;
+    }
+
+    await play();
+  }
+
   Future<void> pause() => player.pause();
 
   Future<void> next() async {
+    _interacted = true;
+    await _applyPendingRestore();
+
     if (player.hasNext) {
       await player.seekToNext();
     }
   }
 
   Future<void> previous() async {
+    _interacted = true;
+    await _applyPendingRestore();
+
     // just_audio restarts the current track if more than 3s have played.
     await player.seekToPrevious();
   }
 
-  Future<void> seek(Duration position) => player.seek(position);
+  Future<void> seek(Duration position) async {
+    _interacted = true;
+    _pendingRestore = null;
+    await player.seek(position);
+  }
 
   Future<void> forward15() async {
     final duration = player.duration;
     if (duration == null) return;
+
+    _interacted = true;
+    await _applyPendingRestore();
 
     final target = player.position + const Duration(seconds: 15);
     await player.seek(target > duration ? duration : target);
   }
 
   Future<void> rewind15() async {
+    _interacted = true;
+    await _applyPendingRestore();
+
     final target = player.position - const Duration(seconds: 15);
     await player.seek(target < Duration.zero ? Duration.zero : target);
   }
@@ -276,7 +397,7 @@ class QuranAudioService {
 
   Future<void> dispose() async {
     if (_listening) {
-      await _saveProgress();
+      await persistNow();
     }
 
     cancelSleepTimer();

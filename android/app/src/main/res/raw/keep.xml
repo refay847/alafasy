@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- These icons are referenced by name at runtime (audio_service looks them up
+     with getIdentifier), so tell the resource shrinker not to strip them from
+     release builds. -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_stat_quran,@drawable/ic_notif_*,@drawable/audio_service_*" />

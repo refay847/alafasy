@@ -1,35 +1,21 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:just_audio_media_kit/just_audio_media_kit.dart';
-
+import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
-import 'package:just_audio_background/just_audio_background.dart';
+import 'package:just_audio_media_kit/just_audio_media_kit.dart';
 
 import 'core/theme/app_theme.dart';
 import 'features/quran/data/datasources/quran_local_data_source.dart';
 import 'features/quran/data/datasources/quran_preferences.dart';
+import 'features/quran/data/services/notification_artwork.dart';
+import 'features/quran/data/services/quran_audio_handler.dart';
 import 'features/quran/data/services/quran_audio_service.dart';
 import 'features/quran/presentation/pages/home_page.dart';
 import 'features/quran/presentation/state/quran_controller.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  if (Platform.isLinux || Platform.isWindows) {
-    // Desktop has no native just_audio backend, so use media_kit.
-    JustAudioMediaKit.ensureInitialized(linux: true, windows: true);
-  } else {
-    await JustAudioBackground.init(
-      androidNotificationChannelId: 'com.example.alafasy.audio',
-      androidNotificationChannelName: 'Quran Audio',
-      androidNotificationChannelDescription: 'Quran audio playback controls',
-      androidNotificationOngoing: true,
-      androidStopForegroundOnPause: true,
-      fastForwardInterval: const Duration(seconds: 15),
-      rewindInterval: const Duration(seconds: 15),
-    );
-  }
 
   final preferences = await QuranPreferences.create();
 
@@ -39,6 +25,38 @@ Future<void> main() async {
     surahs: QuranLocalDataSource.surahs,
     preferences: preferences,
   );
+
+  if (Platform.isLinux || Platform.isWindows) {
+    // Desktop has no native just_audio backend, so use media_kit.
+    JustAudioMediaKit.ensureInitialized(linux: true, windows: true);
+  } else {
+    // Artwork for the notification shade / lock screen (rendered once, cached).
+    final artworkUri = await NotificationArtwork.ensureCreated();
+
+    // Custom handler = custom notification buttons:
+    // favorite | previous | play/pause | next | close (X)
+    await AudioService.init<QuranAudioHandler>(
+      builder: () => QuranAudioHandler(
+        audio: audioService,
+        surahs: QuranLocalDataSource.surahs,
+        isFavorite: controller.isFavorite,
+        onToggleFavorite: controller.toggleFavorite,
+        favoritesListenable: controller,
+        artworkUri: artworkUri,
+      ),
+      config: const AudioServiceConfig(
+        androidNotificationChannelId: 'com.example.alafasy.audio',
+        androidNotificationChannelName: 'القرآن الكريم',
+        androidNotificationChannelDescription: 'التحكم في تشغيل القرآن الكريم',
+        // Gold accent for the media notification.
+        notificationColor: Color(0xFFC49A3A),
+        // Monochrome status-bar icon (android/app/src/main/res/drawable).
+        androidNotificationIcon: 'drawable/ic_stat_quran',
+        androidNotificationOngoing: true,
+        androidStopForegroundOnPause: true,
+      ),
+    );
+  }
 
   // Don't block runApp on initialize(); the widget tree shows a loading /
   // error state instead of a blank screen if something fails.
@@ -64,7 +82,7 @@ class QuranApp extends StatefulWidget {
   State<QuranApp> createState() => _QuranAppState();
 }
 
-class _QuranAppState extends State<QuranApp> {
+class _QuranAppState extends State<QuranApp> with WidgetsBindingObserver {
   final GlobalKey<ScaffoldMessengerState> _messengerKey =
       GlobalKey<ScaffoldMessengerState>();
 
@@ -74,6 +92,8 @@ class _QuranAppState extends State<QuranApp> {
   @override
   void initState() {
     super.initState();
+
+    WidgetsBinding.instance.addObserver(this);
 
     _initFuture = widget.audioService.initialize();
 
@@ -89,7 +109,17 @@ class _QuranAppState extends State<QuranApp> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // The OS can kill the app right after it goes to the background without
+    // calling dispose(), so save the current surah + position right now.
+    if (state != AppLifecycleState.resumed) {
+      unawaited(widget.audioService.persistNow());
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _errorSubscription?.cancel();
     widget.audioService.dispose();
     super.dispose();

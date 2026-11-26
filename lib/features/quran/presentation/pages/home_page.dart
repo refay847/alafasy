@@ -39,8 +39,16 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  // Approximate layout metrics, only used to jump close to the current surah
+  // before Scrollable.ensureVisible makes it exact.
+  static const double _headerExtent = 170;
+  static const double _pinnedExtent = 124;
+  static const double _tileExtent = 78;
+
   late final List<_IndexedSurah> _index;
   final TextEditingController _searchController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+  final GlobalKey _currentTileKey = GlobalKey();
 
   String _query = '';
   _Filter _filter = _Filter.all;
@@ -59,12 +67,42 @@ class _HomePageState extends State<HomePage> {
           ),
         )
         .toList();
+
+    // When the app opens with a restored session, bring that surah into view
+    // instead of always starting at the top of the list.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToCurrent());
   }
 
   @override
   void dispose() {
     _searchController.dispose();
+    _scrollController.dispose();
     super.dispose();
+  }
+
+  void _scrollToCurrent() {
+    if (!mounted || !_scrollController.hasClients) return;
+    if (!widget.audioService.hasSession.value) return;
+
+    final index = widget.audioService.player.currentIndex;
+    if (index == null || index <= 0) return;
+
+    final position = _scrollController.position;
+
+    // 1) Jump close to the tile so the lazy list builds it.
+    final itemTop = _headerExtent + _pinnedExtent + 4 + index * _tileExtent;
+    final target = (itemTop - position.viewportDimension * 0.3)
+        .clamp(0.0, position.maxScrollExtent)
+        .toDouble();
+    _scrollController.jumpTo(target);
+
+    // 2) Fine-tune using the real tile position.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final tileContext = _currentTileKey.currentContext;
+      if (!mounted || tileContext == null) return;
+
+      Scrollable.ensureVisible(tileContext, alignment: 0.3);
+    });
   }
 
   List<Surah> _visibleSurahs() {
@@ -142,6 +180,7 @@ class _HomePageState extends State<HomePage> {
                       : null;
 
                   return CustomScrollView(
+                    controller: _scrollController,
                     keyboardDismissBehavior:
                         ScrollViewKeyboardDismissBehavior.onDrag,
                     slivers: [
@@ -174,6 +213,7 @@ class _HomePageState extends State<HomePage> {
                               final isCurrent = surah.number == currentNumber;
 
                               return _SurahTile(
+                                key: isCurrent ? _currentTileKey : null,
                                 surah: surah,
                                 isCurrent: isCurrent,
                                 isPlaying: isCurrent && isPlaying,
@@ -422,6 +462,7 @@ class _EmptyState extends StatelessWidget {
 
 class _SurahTile extends StatelessWidget {
   const _SurahTile({
+    super.key,
     required this.surah,
     required this.isCurrent,
     required this.isPlaying,

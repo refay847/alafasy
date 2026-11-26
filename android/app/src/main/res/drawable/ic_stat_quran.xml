@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Monochrome open-book icon for the status bar / media notification.
+     Android tints it automatically, so it must stay a single flat color. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M11.4,6.2C9.9,5.1 7.9,4.6 5.6,4.6C4.3,4.6 3,4.8 2,5.3L2,19C3,18.5 4.3,18.3 5.6,18.3C7.9,18.3 9.9,18.8 11.4,19.9Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12.6,6.2C14.1,5.1 16.1,4.6 18.4,4.6C19.7,4.6 21,4.8 22,5.3L22,19C21,18.5 19.7,18.3 18.4,18.3C16.1,18.3 14.1,18.8 12.6,19.9Z" />
+</vector>

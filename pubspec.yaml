@@ -15,10 +15,12 @@ dependencies:
   cupertino_icons: ^1.0.8
 
   just_audio: ^0.10.6
-  just_audio_background: ^0.0.1-beta.17
-  # Imported directly for MediaItem (was only a transitive dependency before).
-  audio_service: ^0.18.0
+  # Custom AudioHandler (notification with favorite / prev / play / next / close).
+  # Replaces just_audio_background, which cannot add custom buttons.
+  audio_service: ^0.18.18
   shared_preferences: ^2.5.3
+  # Used to cache the generated notification artwork.
+  path_provider: ^2.1.5
   just_audio_media_kit: ^2.1.0
   media_kit_libs_linux: ^1.2.1
 
