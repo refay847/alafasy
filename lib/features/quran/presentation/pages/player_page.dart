@@ -1,5 +1,7 @@
 import 'dart:math' as math;
+import 'dart:ui' show FontFeature;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
@@ -102,10 +104,11 @@ class _PlayerPageState extends State<PlayerPage> {
               body: SafeArea(
                 child: LayoutBuilder(
                   builder: (context, constraints) {
-                    final artworkSize = math
-                        .min(constraints.maxWidth * 0.64,
-                            constraints.maxHeight * 0.34)
-                        .clamp(150.0, 280.0)
+                    // Outer size of the artwork + progress ring.
+                    final ringSize = math
+                        .min(constraints.maxWidth - 48,
+                            constraints.maxHeight * 0.42)
+                        .clamp(230.0, 330.0)
                         .toDouble();
 
                     // Scrollable so small phones / large fonts never overflow.
@@ -117,13 +120,7 @@ class _PlayerPageState extends State<PlayerPage> {
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            const SizedBox(height: 16),
-                            _Artwork(
-                              size: artworkSize,
-                              surahNumber: surah.number,
-                              player: _player,
-                            ),
-                            const SizedBox(height: 24),
+                            const SizedBox(height: 8),
                             Text(
                               surah.arabicName,
                               textAlign: TextAlign.center,
@@ -133,25 +130,13 @@ class _PlayerPageState extends State<PlayerPage> {
                                 color: colors.goldText,
                               ),
                             ),
-                            const SizedBox(height: 6),
-                            Text(
-                              surah.englishName,
-                              style: TextStyle(
-                                fontSize: 16,
-                                color: colors.muted,
-                              ),
+                            const SizedBox(height: 20),
+                            _ArtworkProgress(
+                              size: ringSize,
+                              surahNumber: surah.number,
+                              player: _player,
                             ),
-                            const SizedBox(height: 6),
-                            Text(
-                              'السورة رقم ${ArabicUtils.toArabicDigits(surah.number)}',
-                              style: TextStyle(
-                                color: colors.gold,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(height: 24),
-                            _ProgressBar(player: _player),
-                            const SizedBox(height: 8),
+                            const SizedBox(height: 20),
                             _MainControls(audioService: _audio),
                             const SizedBox(height: 20),
                             _SecondaryControls(audioService: _audio),
@@ -303,90 +288,376 @@ class _Artwork extends StatelessWidget {
 }
 
 // -----------------------------------------------------------------------------
-// Progress bar (smooth dragging, no jitter while scrubbing)
+// Artwork wrapped by a circular progress ring (with a gap at the top that
+// shows "elapsed / total")
 // -----------------------------------------------------------------------------
 
-class _ProgressBar extends StatefulWidget {
-  const _ProgressBar({required this.player});
+/// Formats a duration as `mm:ss` (or `h:mm:ss` for long recordings) using
+/// Latin digits, e.g. `08:57`.
+String _clock(Duration duration) {
+  final hours = duration.inHours;
+  final minutes = duration.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final seconds = duration.inSeconds.remainder(60).toString().padLeft(2, '0');
 
+  return hours > 0 ? '$hours:$minutes:$seconds' : '$minutes:$seconds';
+}
+
+class _ArtworkProgress extends StatefulWidget {
+  const _ArtworkProgress({
+    required this.size,
+    required this.surahNumber,
+    required this.player,
+  });
+
+  /// Outer size of the whole widget (ring included).
+  final double size;
+  final int surahNumber;
   final AudioPlayer player;
 
   @override
-  State<_ProgressBar> createState() => _ProgressBarState();
+  State<_ArtworkProgress> createState() => _ArtworkProgressState();
 }
 
-class _ProgressBarState extends State<_ProgressBar> {
-  double? _dragValue;
+class _ArtworkProgressState extends State<_ArtworkProgress> {
+  /// Distance between the widget edge and the centre line of the ring.
+  static const double _inset = 16;
+  static const double _strokeWidth = 6;
+  static const double _thumbRadius = 9;
+
+  /// Angular size of the opening at the top of the ring.
+  static const double _gap = 72 * math.pi / 180;
+  static const double _sweep = 2 * math.pi - _gap;
+
+  /// How far from the ring line a touch still counts as grabbing the ring.
+  static const double _touchBand = 26;
+
+  /// 0..1 while the user is scrubbing, otherwise null.
+  double? _dragFraction;
+  Duration _duration = Duration.zero;
+
+  double get _radius => widget.size / 2 - _inset;
+  bool get _ready => _duration.inMilliseconds > 0;
+
+  bool _hitsRing(Offset local) {
+    if (!_ready) return false;
+
+    final distance = (local - Offset(widget.size / 2, widget.size / 2)).distance;
+
+    return (distance - _radius).abs() <= _touchBand;
+  }
+
+  /// Converts a touch position to a 0..1 progress value.
+  double _fractionAt(Offset local, double previous) {
+    final center = Offset(widget.size / 2, widget.size / 2);
+    final delta = local - center;
+
+    // Angle measured counter-clockwise from 12 o'clock (the ring fills from
+    // the left side of the opening, down and around to the right).
+    var angle = math.atan2(-delta.dx, -delta.dy);
+    if (angle < 0) angle += 2 * math.pi;
+
+    const half = _gap / 2;
+
+    // Inside the opening: stick to whichever end we were closest to, so the
+    // thumb never jumps from the end to the start while dragging.
+    if (angle < half || angle > 2 * math.pi - half) {
+      return previous >= 0.5 ? 1.0 : 0.0;
+    }
+
+    return ((angle - half) / _sweep).clamp(0.0, 1.0).toDouble();
+  }
+
+  void _onStart(Offset local, double current) {
+    HapticFeedback.selectionClick();
+    setState(() => _dragFraction = _fractionAt(local, current));
+  }
+
+  void _onUpdate(Offset local) {
+    setState(
+      () => _dragFraction = _fractionAt(local, _dragFraction ?? 0),
+    );
+  }
+
+  void _onEnd() {
+    final fraction = _dragFraction;
+    if (fraction == null) return;
+
+    final target = Duration(
+      milliseconds: (fraction * _duration.inMilliseconds).round(),
+    );
+
+    // Keep showing the dragged value until the seek has finished, otherwise
+    // the thumb flickers back to the old position for a frame.
+    widget.player.seek(target).whenComplete(() {
+      if (mounted) setState(() => _dragFraction = null);
+    });
+  }
+
+  void _onCancel() {
+    if (mounted) setState(() => _dragFraction = null);
+  }
+
+  void _nudge(Duration delta) {
+    if (!_ready) return;
+
+    final target = widget.player.position + delta;
+    final clamped = target < Duration.zero
+        ? Duration.zero
+        : (target > _duration ? _duration : target);
+
+    widget.player.seek(clamped);
+  }
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
     final player = widget.player;
+    final artworkSize = widget.size - 2 * (_inset + 22);
 
-    // Timelines are LTR by media convention, even in an RTL app.
-    return Directionality(
-      textDirection: TextDirection.ltr,
-      child: StreamBuilder<Duration?>(
-        stream: player.durationStream,
-        initialData: player.duration,
-        builder: (context, durationSnapshot) {
-          final duration = durationSnapshot.data ?? Duration.zero;
+    return SizedBox(
+      width: widget.size,
+      height: widget.size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          // The photo does not depend on the position stream, so it is never
+          // rebuilt while the song plays.
+          _Artwork(
+            size: artworkSize,
+            surahNumber: widget.surahNumber,
+            player: player,
+          ),
 
-          return StreamBuilder<Duration>(
-            stream: player.positionStream,
-            builder: (context, positionSnapshot) {
-              final position = positionSnapshot.data ?? player.position;
+          // Ring + time label + gestures.
+          Directionality(
+            textDirection: TextDirection.ltr,
+            child: StreamBuilder<Duration?>(
+              stream: player.durationStream,
+              initialData: player.duration,
+              builder: (context, durationSnapshot) {
+                _duration = durationSnapshot.data ?? Duration.zero;
 
-              final maxMs = duration.inMilliseconds.toDouble();
-              final ready = maxMs > 0;
+                return StreamBuilder<Duration>(
+                  stream: player.positionStream,
+                  initialData: player.position,
+                  builder: (context, positionSnapshot) {
+                    final position = positionSnapshot.data ?? Duration.zero;
+                    final totalMs = _duration.inMilliseconds;
 
-              final positionMs = position.inMilliseconds.toDouble();
-              final shownMs = _dragValue ?? positionMs;
+                    final playedFraction = _ready
+                        ? (position.inMilliseconds / totalMs)
+                            .clamp(0.0, 1.0)
+                            .toDouble()
+                        : 0.0;
+                    final fraction = _dragFraction ?? playedFraction;
 
-              final sliderValue = ready
-                  ? shownMs.clamp(0.0, maxMs).toDouble()
-                  : 0.0;
+                    final shownPosition = _dragFraction != null
+                        ? Duration(
+                            milliseconds: (fraction * totalMs).round(),
+                          )
+                        : position;
 
-              return Column(
-                children: [
-                  Slider(
-                    min: 0,
-                    max: ready ? maxMs : 1,
-                    value: sliderValue,
-                    onChanged: ready
-                        ? (value) => setState(() => _dragValue = value)
-                        : null,
-                    onChangeEnd: (value) {
-                      player.seek(Duration(milliseconds: value.round()));
-                      setState(() => _dragValue = null);
-                    },
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          ArabicUtils.formatDuration(
-                            Duration(milliseconds: shownMs.round()),
+                    final label = _ready
+                        ? '${_clock(shownPosition)} / ${_clock(_duration)}'
+                        : '--:-- / --:--';
+
+                    return Semantics(
+                      slider: true,
+                      label: 'التقدم',
+                      value: label,
+                      onIncrease: () => _nudge(const Duration(seconds: 15)),
+                      onDecrease: () => _nudge(const Duration(seconds: -15)),
+                      child: RawGestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        gestures: {
+                          _RingGestureRecognizer:
+                              GestureRecognizerFactoryWithHandlers<
+                                  _RingGestureRecognizer>(
+                            () => _RingGestureRecognizer(),
+                            (recognizer) {
+                              recognizer.hitTest = _hitsRing;
+                              recognizer.onStart = (local) {
+                                _onStart(local, fraction);
+                              };
+                              recognizer.onUpdate = _onUpdate;
+                              recognizer.onEnd = _onEnd;
+                              recognizer.onCancel = _onCancel;
+                            },
                           ),
-                          style: TextStyle(fontSize: 12, color: colors.muted),
+                        },
+                        child: SizedBox(
+                          width: widget.size,
+                          height: widget.size,
+                          child: Stack(
+                            children: [
+                              Positioned.fill(
+                                child: CustomPaint(
+                                  painter: _RingPainter(
+                                    fraction: fraction,
+                                    inset: _inset,
+                                    gap: _gap,
+                                    strokeWidth: _strokeWidth,
+                                    thumbRadius: _thumbRadius,
+                                    dragging: _dragFraction != null,
+                                    trackColor:
+                                        colors.gold.withValues(alpha: 0.22),
+                                    progressColor: colors.gold,
+                                    thumbBorderColor: colors.card,
+                                  ),
+                                ),
+                              ),
+                              // Time sits in the opening at the top.
+                              Positioned(
+                                top: _inset - 14,
+                                left: 0,
+                                right: 0,
+                                height: 28,
+                                child: Center(
+                                  child: Text(
+                                    label,
+                                    maxLines: 1,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w700,
+                                      letterSpacing: 0.3,
+                                      color: _dragFraction != null
+                                          ? colors.goldText
+                                          : colors.muted,
+                                      fontFeatures: const [
+                                        FontFeature.tabularFigures(),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                        Text(
-                          ArabicUtils.formatDuration(duration),
-                          style: TextStyle(fontSize: 12, color: colors.muted),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              );
-            },
-          );
-        },
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
+}
+
+class _RingPainter extends CustomPainter {
+  const _RingPainter({
+    required this.fraction,
+    required this.inset,
+    required this.gap,
+    required this.strokeWidth,
+    required this.thumbRadius,
+    required this.dragging,
+    required this.trackColor,
+    required this.progressColor,
+    required this.thumbBorderColor,
+  });
+
+  final double fraction;
+  final double inset;
+  final double gap;
+  final double strokeWidth;
+  final double thumbRadius;
+  final bool dragging;
+  final Color trackColor;
+  final Color progressColor;
+  final Color thumbBorderColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = size.center(Offset.zero);
+    final radius = size.width / 2 - inset;
+    final rect = Rect.fromCircle(center: center, radius: radius);
+
+    // 0 rad is 3 o'clock. Start just left of 12 o'clock and sweep
+    // counter-clockwise (negative): down the left side, along the bottom from
+    // left to right, then up the right side, leaving the opening at the top.
+    final startAngle = -math.pi / 2 - gap / 2;
+    final totalSweep = -(2 * math.pi - gap);
+
+    final trackPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = strokeWidth
+      ..color = trackColor;
+
+    final progressPaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = strokeWidth
+      ..color = progressColor;
+
+    canvas.drawArc(rect, startAngle, totalSweep, false, trackPaint);
+
+    final progressSweep = totalSweep * fraction;
+    if (progressSweep != 0) {
+      canvas.drawArc(rect, startAngle, progressSweep, false, progressPaint);
+    }
+
+    // Thumb.
+    final thumbAngle = startAngle + progressSweep;
+    final thumbCenter = Offset(
+      center.dx + radius * math.cos(thumbAngle),
+      center.dy + radius * math.sin(thumbAngle),
+    );
+    final r = dragging ? thumbRadius * 1.25 : thumbRadius;
+
+    canvas.drawCircle(thumbCenter, r + 2, Paint()..color = thumbBorderColor);
+    canvas.drawCircle(thumbCenter, r, Paint()..color = progressColor);
+  }
+
+  @override
+  bool shouldRepaint(_RingPainter old) =>
+      old.fraction != fraction ||
+      old.dragging != dragging ||
+      old.trackColor != trackColor ||
+      old.progressColor != progressColor ||
+      old.thumbBorderColor != thumbBorderColor ||
+      old.inset != inset;
+}
+
+/// Claims the touch immediately when it starts on the ring, so scrubbing wins
+/// over the page's vertical scrolling; touches elsewhere are ignored.
+class _RingGestureRecognizer extends OneSequenceGestureRecognizer {
+  bool Function(Offset local)? hitTest;
+  void Function(Offset local)? onStart;
+  void Function(Offset local)? onUpdate;
+  VoidCallback? onEnd;
+  VoidCallback? onCancel;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    if (!(hitTest?.call(event.localPosition) ?? false)) return;
+
+    startTrackingPointer(event.pointer, event.transform);
+    resolve(GestureDisposition.accepted);
+    onStart?.call(event.localPosition);
+  }
+
+  @override
+  void handleEvent(PointerEvent event) {
+    if (event is PointerMoveEvent) {
+      onUpdate?.call(event.localPosition);
+    } else if (event is PointerUpEvent) {
+      stopTrackingPointer(event.pointer);
+      onEnd?.call();
+    } else if (event is PointerCancelEvent) {
+      stopTrackingPointer(event.pointer);
+      onCancel?.call();
+    }
+  }
+
+  @override
+  void didStopTrackingLastPointer(int pointer) {}
+
+  @override
+  String get debugDescription => 'ring scrub';
 }
 
 // -----------------------------------------------------------------------------
