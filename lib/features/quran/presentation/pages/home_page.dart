@@ -1,144 +1,372 @@
-import 'package:flutter/material.dart';
+import 'dart:async';
 
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../../../../core/theme/app_theme.dart';
+import '../../../../core/utils/arabic_utils.dart';
 import '../../data/services/quran_audio_service.dart';
 import '../../domain/entities/surah.dart';
+import '../state/quran_controller.dart';
+import '../widgets/equalizer_icon.dart';
+import '../widgets/mini_player.dart';
 import 'player_page.dart';
+
+enum _Filter { all, favorites }
+
+class _IndexedSurah {
+  const _IndexedSurah(this.surah, this.arabic, this.english);
+
+  final Surah surah;
+  final String arabic;
+  final String english;
+}
 
 class HomePage extends StatefulWidget {
   const HomePage({
     super.key,
     required this.audioService,
     required this.surahs,
+    required this.controller,
   });
 
   final QuranAudioService audioService;
   final List<Surah> surahs;
+  final QuranController controller;
 
   @override
   State<HomePage> createState() => _HomePageState();
 }
 
 class _HomePageState extends State<HomePage> {
-  String searchQuery = '';
+  late final List<_IndexedSurah> _index;
+  final TextEditingController _searchController = TextEditingController();
 
-  List<Surah> get filteredSurahs {
-    if (searchQuery.trim().isEmpty) {
-      return widget.surahs;
-    }
+  String _query = '';
+  _Filter _filter = _Filter.all;
 
-    final query = searchQuery.trim().toLowerCase();
+  @override
+  void initState() {
+    super.initState();
 
-    return widget.surahs.where((surah) {
-      return surah.arabicName.contains(query) ||
-          surah.englishName.toLowerCase().contains(query) ||
-          surah.number.toString() == query;
-    }).toList();
+    // Normalize names once instead of on every keystroke / rebuild.
+    _index = widget.surahs
+        .map(
+          (s) => _IndexedSurah(
+            s,
+            ArabicUtils.normalize(s.arabicName),
+            ArabicUtils.normalize(s.englishName),
+          ),
+        )
+        .toList();
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  List<Surah> _visibleSurahs() {
+    final query = ArabicUtils.normalize(_query);
+
+    return _index.where((entry) {
+      if (_filter == _Filter.favorites &&
+          !widget.controller.isFavorite(entry.surah.number)) {
+        return false;
+      }
+
+      if (query.isEmpty) return true;
+
+      return entry.surah.number.toString() == query ||
+          entry.arabic.contains(query) ||
+          entry.english.contains(query);
+    }).map((entry) => entry.surah).toList();
+  }
+
+  void _openSurah(Surah surah) {
+    // Intentionally not awaited: playback must not block navigation.
+    unawaited(widget.audioService.playSurah(surah.number - 1));
+
+    PlayerPage.open(
+      context,
+      audioService: widget.audioService,
+      surahs: widget.surahs,
+      controller: widget.controller,
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          'القرآن الكريم',
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-      ),
+    final player = widget.audioService.player;
 
-      body: Column(
-        children: [
-          _buildHeader(),
-          _buildSearch(),
+    return ListenableBuilder(
+      listenable: widget.controller,
+      builder: (context, _) {
+        final colors = context.colors;
+        final isDark = Theme.of(context).brightness == Brightness.dark;
+        final visible = _visibleSurahs();
 
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.fromLTRB(
-                16,
-                8,
-                16,
-                100,
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('القرآن الكريم'),
+            actions: [
+              IconButton(
+                tooltip: isDark ? 'الوضع الفاتح' : 'الوضع الداكن',
+                onPressed: () =>
+                    widget.controller.toggleTheme(isDarkNow: isDark),
+                icon: Icon(
+                  isDark ? Icons.light_mode_outlined : Icons.dark_mode_outlined,
+                ),
               ),
-              itemCount: filteredSurahs.length,
-              itemBuilder: (context, index) {
-                final surah = filteredSurahs[index];
+              const SizedBox(width: 4),
+            ],
+          ),
+          bottomNavigationBar: MiniPlayer(
+            audioService: widget.audioService,
+            surahs: widget.surahs,
+            controller: widget.controller,
+          ),
+          body: StreamBuilder<int?>(
+            stream: player.currentIndexStream,
+            initialData: player.currentIndex,
+            builder: (context, indexSnapshot) {
+              return StreamBuilder<bool>(
+                stream: player.playingStream,
+                initialData: player.playing,
+                builder: (context, playingSnapshot) {
+                  final isPlaying = playingSnapshot.data ?? false;
+                  final currentNumber = widget.audioService.hasSession.value &&
+                          indexSnapshot.data != null
+                      ? indexSnapshot.data! + 1
+                      : null;
 
-                return _SurahTile(
-                  surah: surah,
-                  onTap: () async {
-                    await widget.audioService.playSurah(
-                      surah.number - 1,
-                    );
-
-                    if (!context.mounted) return;
-
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => PlayerPage(
-                          audioService: widget.audioService,
-                          surahs: widget.surahs,
+                  return CustomScrollView(
+                    keyboardDismissBehavior:
+                        ScrollViewKeyboardDismissBehavior.onDrag,
+                    slivers: [
+                      SliverToBoxAdapter(
+                        child: _Header(total: widget.surahs.length),
+                      ),
+                      SliverPersistentHeader(
+                        pinned: true,
+                        delegate: _PinnedHeaderDelegate(
+                          height: 124,
+                          color: colors.background,
+                          child: _buildSearchAndFilter(colors),
                         ),
                       ),
-                    );
-                  },
-                );
+                      if (visible.isEmpty)
+                        SliverFillRemaining(
+                          hasScrollBody: false,
+                          child: _EmptyState(
+                            isFavorites: _filter == _Filter.favorites &&
+                                _query.trim().isEmpty,
+                          ),
+                        )
+                      else
+                        SliverPadding(
+                          padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                          sliver: SliverList.builder(
+                            itemCount: visible.length,
+                            itemBuilder: (context, i) {
+                              final surah = visible[i];
+                              final isCurrent = surah.number == currentNumber;
+
+                              return _SurahTile(
+                                surah: surah,
+                                isCurrent: isCurrent,
+                                isPlaying: isCurrent && isPlaying,
+                                isFavorite:
+                                    widget.controller.isFavorite(surah.number),
+                                onTap: () => _openSurah(surah),
+                                onToggleFavorite: () {
+                                  HapticFeedback.selectionClick();
+                                  widget.controller
+                                      .toggleFavorite(surah.number);
+                                },
+                              );
+                            },
+                          ),
+                        ),
+                    ],
+                  );
+                },
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildSearchAndFilter(AppColors colors) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      child: Column(
+        children: [
+          SizedBox(
+            height: 52,
+            child: TextField(
+              controller: _searchController,
+              textDirection: TextDirection.rtl,
+              textInputAction: TextInputAction.search,
+              onChanged: (value) => setState(() => _query = value),
+              decoration: InputDecoration(
+                hintText: 'ابحث بالاسم أو برقم السورة...',
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
+                prefixIcon: Icon(Icons.search, color: colors.gold),
+                suffixIcon: _query.isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: 'مسح',
+                        icon: const Icon(Icons.close_rounded),
+                        onPressed: () {
+                          _searchController.clear();
+                          setState(() => _query = '');
+                        },
+                      ),
+                filled: true,
+                fillColor: colors.card,
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                  borderSide: BorderSide(color: colors.border),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                  borderSide: BorderSide(color: colors.gold, width: 1.5),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            height: 44,
+            width: double.infinity,
+            child: SegmentedButton<_Filter>(
+              showSelectedIcon: false,
+              segments: [
+                ButtonSegment(
+                  value: _Filter.all,
+                  icon: const Icon(Icons.menu_book_outlined, size: 18),
+                  label: const Text('كل السور'),
+                ),
+                ButtonSegment(
+                  value: _Filter.favorites,
+                  icon: const Icon(Icons.favorite_border, size: 18),
+                  label: Text(
+                    'المفضلة (${ArabicUtils.toArabicDigits(widget.controller.favoritesCount)})',
+                  ),
+                ),
+              ],
+              selected: {_filter},
+              onSelectionChanged: (selection) {
+                setState(() => _filter = selection.first);
               },
+              style: ButtonStyle(
+                backgroundColor: WidgetStateProperty.resolveWith((states) {
+                  return states.contains(WidgetState.selected)
+                      ? colors.goldSoft
+                      : colors.card;
+                }),
+                foregroundColor: WidgetStateProperty.resolveWith((states) {
+                  return states.contains(WidgetState.selected)
+                      ? colors.goldText
+                      : colors.muted;
+                }),
+                side: WidgetStatePropertyAll(BorderSide(color: colors.border)),
+              ),
             ),
           ),
         ],
       ),
     );
   }
+}
 
-  Widget _buildHeader() {
+class _PinnedHeaderDelegate extends SliverPersistentHeaderDelegate {
+  _PinnedHeaderDelegate({
+    required this.height,
+    required this.color,
+    required this.child,
+  });
+
+  final double height;
+  final Color color;
+  final Widget child;
+
+  @override
+  double get minExtent => height;
+
+  @override
+  double get maxExtent => height;
+
+  @override
+  Widget build(
+    BuildContext context,
+    double shrinkOffset,
+    bool overlapsContent,
+  ) {
+    return Material(
+      color: color,
+      surfaceTintColor: Colors.transparent,
+      elevation: overlapsContent ? 2 : 0,
+      shadowColor: context.colors.shadow,
+      child: child,
+    );
+  }
+
+  @override
+  bool shouldRebuild(covariant _PinnedHeaderDelegate oldDelegate) => true;
+}
+
+class _Header extends StatelessWidget {
+  const _Header({required this.total});
+
+  final int total;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.all(16),
-      padding: const EdgeInsets.all(24),
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: colors.card,
         borderRadius: BorderRadius.circular(24),
-        border: Border.all(
-          color: const Color(0xFFE7D7AF),
-        ),
+        border: Border.all(color: colors.border),
       ),
       child: Column(
         children: [
-          const Text(
+          Text(
             'القرآن الكريم',
             style: TextStyle(
               fontSize: 28,
               fontWeight: FontWeight.bold,
-              color: Color(0xFF8A6A24),
+              color: colors.goldText,
             ),
           ),
-
-          const SizedBox(height: 8),
-
+          const SizedBox(height: 6),
           Text(
             'بصوت الشيخ مشاري بن راشد العفاسي',
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.grey.shade600,
-            ),
+            style: TextStyle(fontSize: 14, color: colors.muted),
           ),
-
-          const SizedBox(height: 16),
-
+          const SizedBox(height: 14),
           Container(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 14,
-              vertical: 8,
-            ),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
             decoration: BoxDecoration(
-              color: const Color(0xFFFFF8E8),
+              color: colors.goldSoft,
               borderRadius: BorderRadius.circular(20),
             ),
-            child: const Text(
-              '١١٤ سورة',
+            child: Text(
+              '${ArabicUtils.toArabicDigits(total)} سورة',
               style: TextStyle(
-                color: Color(0xFF8A6A24),
+                color: colors.goldText,
                 fontWeight: FontWeight.bold,
               ),
             ),
@@ -147,29 +375,45 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
+}
 
-  Widget _buildSearch() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: TextField(
-        textDirection: TextDirection.rtl,
-        onChanged: (value) {
-          setState(() {
-            searchQuery = value;
-          });
-        },
-        decoration: InputDecoration(
-          hintText: 'ابحث عن سورة...',
-          prefixIcon: const Icon(
-            Icons.search,
-            color: Color(0xFFC49A3A),
-          ),
-          filled: true,
-          fillColor: Colors.white,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
-            borderSide: BorderSide.none,
-          ),
+class _EmptyState extends StatelessWidget {
+  const _EmptyState({required this.isFavorites});
+
+  final bool isFavorites;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              isFavorites ? Icons.favorite_border : Icons.search_off_rounded,
+              size: 56,
+              color: colors.gold,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              isFavorites
+                  ? 'لم تضف أي سورة إلى المفضلة بعد'
+                  : 'لا توجد نتائج مطابقة',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              isFavorites
+                  ? 'اضغط على القلب بجوار أي سورة لإضافتها هنا'
+                  : 'جرّب البحث باسم آخر أو برقم السورة',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: colors.muted),
+            ),
+          ],
         ),
       ),
     );
@@ -179,69 +423,106 @@ class _HomePageState extends State<HomePage> {
 class _SurahTile extends StatelessWidget {
   const _SurahTile({
     required this.surah,
+    required this.isCurrent,
+    required this.isPlaying,
+    required this.isFavorite,
     required this.onTap,
+    required this.onToggleFavorite,
   });
 
   final Surah surah;
+  final bool isCurrent;
+  final bool isPlaying;
+  final bool isFavorite;
   final VoidCallback onTap;
+  final VoidCallback onToggleFavorite;
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18),
-        side: const BorderSide(
-          color: Color(0xFFEFE5CE),
-        ),
-      ),
-      child: ListTile(
-        onTap: onTap,
+    final colors = context.colors;
 
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 18,
-          vertical: 8,
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: isCurrent ? colors.goldSoft : colors.card,
+        clipBehavior: Clip.antiAlias,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: BorderSide(
+            color: isCurrent ? colors.gold : colors.border,
+            width: isCurrent ? 1.5 : 1,
+          ),
         ),
-
-        leading: Container(
-          width: 44,
-          height: 44,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: const Color(0xFFFFF7E5),
-            border: Border.all(
-              color: const Color(0xFFD5B765),
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: isCurrent ? colors.card : colors.goldSoft,
+                    border: Border.all(color: colors.gold.withValues(alpha: 0.7)),
+                  ),
+                  child: Center(
+                    child: isCurrent
+                        ? EqualizerIcon(
+                            animating: isPlaying,
+                            color: colors.gold,
+                            size: 20,
+                          )
+                        : Text(
+                            ArabicUtils.toArabicDigits(surah.number),
+                            style: TextStyle(
+                              color: colors.goldText,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        surah.arabicName,
+                        style: const TextStyle(
+                          fontSize: 19,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        surah.englishName,
+                        style: TextStyle(fontSize: 13, color: colors.muted),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  tooltip: isFavorite ? 'إزالة من المفضلة' : 'إضافة إلى المفضلة',
+                  onPressed: onToggleFavorite,
+                  icon: Icon(
+                    isFavorite ? Icons.favorite : Icons.favorite_border,
+                    color: isFavorite ? colors.gold : colors.muted,
+                  ),
+                ),
+                Icon(
+                  isPlaying
+                      ? Icons.pause_circle_filled
+                      : (isCurrent
+                          ? Icons.play_circle_filled
+                          : Icons.play_circle_outline),
+                  color: colors.gold,
+                  size: 32,
+                ),
+              ],
             ),
           ),
-          child: Center(
-            child: Text(
-              '${surah.number}',
-              style: const TextStyle(
-                color: Color(0xFF8A6A24),
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ),
-        ),
-
-        title: Text(
-          surah.arabicName,
-          textAlign: TextAlign.right,
-          style: const TextStyle(
-            fontSize: 19,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
-
-        subtitle: Text(
-          surah.englishName,
-          textAlign: TextAlign.right,
-        ),
-
-        trailing: const Icon(
-          Icons.play_circle_outline,
-          color: Color(0xFFC49A3A),
-          size: 32,
         ),
       ),
     );
